@@ -1,25 +1,22 @@
 """
-文件加载模块 - 支持 PDF、Word (.docx)、TXT、PPT (.pptx) 文件解析
+文件加载模块 - 支持 PDF、Word (.docx)、TXT、PPT (.pptx)、Markdown (.md) 文件解析
 统一接口：load_file(uploaded_file) -> list[Document]
 """
-
 import os
 import tempfile
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyMuPDFLoader
 from docx import Document as DocxDocument
 from pptx import Presentation
-
+import re
 
 def _save_temp_file(uploaded_file, suffix):
-    """将上传文件保存为临时文件，返回路径"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getvalue())
         return tmp.name
 
 
 def _load_pdf(uploaded_file) -> list[Document]:
-    """加载 PDF 文件"""
     tmp_path = _save_temp_file(uploaded_file, ".pdf")
     try:
         loader = PyMuPDFLoader(tmp_path)
@@ -29,7 +26,6 @@ def _load_pdf(uploaded_file) -> list[Document]:
 
 
 def _load_docx(uploaded_file) -> list[Document]:
-    """加载 Word (.docx) 文件"""
     tmp_path = _save_temp_file(uploaded_file, ".docx")
     try:
         doc = DocxDocument(tmp_path)
@@ -41,7 +37,6 @@ def _load_docx(uploaded_file) -> list[Document]:
                     page_content=text,
                     metadata={"source": uploaded_file.name, "paragraph": i + 1}
                 ))
-        # 如果段落过多且零散，合并为按页（每10段一组）的文档
         if len(documents) > 20:
             merged = []
             for start in range(0, len(documents), 10):
@@ -100,32 +95,48 @@ def _load_pptx(uploaded_file) -> list[Document]:
         os.remove(tmp_path)
 
 
-# 格式 -> 加载函数 映射表
+def _load_markdown(uploaded_file) -> list[Document]:
+    """加载 Markdown (.md) 文件，按标题分段"""
+    raw = uploaded_file.getvalue()
+    for encoding in ("utf-8", "gbk", "gb2312", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    else:
+        text = raw.decode("utf-8", errors="ignore")
+
+    sections = re.split(r'(?=^#{1,3}\s)', text, flags=re.MULTILINE)
+    documents = []
+    for i, section in enumerate(sections):
+        content = section.strip()
+        if content:
+            documents.append(Document(
+                page_content=content,
+                metadata={"source": uploaded_file.name, "page": i + 1}
+            ))
+
+    if not documents:
+        documents.append(Document(
+            page_content=text,
+            metadata={"source": uploaded_file.name, "page": 1}
+        ))
+    return documents
+
+
 _LOADERS = {
     "pdf": _load_pdf,
     "docx": _load_docx,
     "txt": _load_txt,
     "pptx": _load_pptx,
+    "md": _load_markdown,
 }
 
-# 支持的文件扩展名列表（供 Streamlit file_uploader 使用）
 SUPPORTED_EXTENSIONS = list(_LOADERS.keys())
 
 
 def load_file(uploaded_file) -> list[Document]:
-    """
-    统一文件加载接口。
-    根据文件扩展名自动选择对应的加载器，返回 LangChain Document 列表。
-
-    Args:
-        uploaded_file: Streamlit UploadedFile 对象
-
-    Returns:
-        list[Document]: 解析后的文档列表
-
-    Raises:
-        ValueError: 不支持的文件格式
-    """
     file_name = uploaded_file.name
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
 

@@ -12,7 +12,7 @@ from file_loader import load_file, SUPPORTED_EXTENSIONS
 from query_rewriter import rewrite_query
 from web_search import web_search, WEB_SEARCH_TOOL
 from code_runner import run_python_code, CODE_RUNNER_TOOL
-from hybrid_search import hybrid_search
+from hybrid_search import hybrid_search, invalidate_bm25_cache
 from file_export import generate_file, list_exports, FILE_EXPORT_TOOL
 from context_manager import truncate_messages
 from visualizer import create_chart, CHART_TOOL
@@ -30,6 +30,7 @@ def process_uploaded_file(uploaded_file):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     chunks = text_splitter.split_documents(documents)
     vector_db.add_documents(chunks)
+    invalidate_bm25_cache()
     return len(chunks)
 
 
@@ -40,6 +41,7 @@ def clear_vector_db():
         vector_db.delete_collection()
         shutil.rmtree(DB_DIR)
     vector_db = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+    invalidate_bm25_cache()
 
 
 def delete_file_from_db(file_name):
@@ -49,6 +51,7 @@ def delete_file_from_db(file_name):
     results = collection.get(where={"source": file_name})
     if results and results["ids"]:
         collection.delete(ids=results["ids"])
+        invalidate_bm25_cache()
         return len(results["ids"])
     return 0
 

@@ -3,22 +3,30 @@
 
 支持柱状图、折线图、饼图、散点图等，
 通过 matplotlib 生成后保存为 PNG 供 Streamlit 展示。
+
+使用独立 Figure 对象 + 线程锁，避免并发时图表串联。
 """
 
 import os
 import io
 import json
+import uuid
 import base64
+import threading
 import matplotlib
 matplotlib.use("Agg")  # 无头模式
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib import colormaps
 import matplotlib.font_manager as fm
 
-# 配置中文字体
-plt.rcParams["font.sans-serif"] = ["Arial Unicode MS", "SimHei", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+# 配置中文字体（只需设一次，全局安全）
+matplotlib.rcParams["font.sans-serif"] = ["Arial Unicode MS", "SimHei", "DejaVu Sans"]
+matplotlib.rcParams["axes.unicode_minus"] = False
 
 CHART_DIR = "./charts"
+
+# 全局锁：matplotlib 后端非完全线程安全，序列化渲染过程
+_render_lock = threading.Lock()
 
 
 def _ensure_chart_dir():
@@ -56,7 +64,9 @@ def create_chart(
     except json.JSONDecodeError:
         return {"error": f"数据格式错误，需要 JSON 格式。收到: {data[:200]}"}
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # 每次创建独立的 Figure，不使用全局 plt，彻底隔离并发请求
+    fig = Figure(figsize=(10, 6))
+    ax = fig.subplots()
 
     try:
         chart_type = chart_type.lower().strip()
@@ -79,33 +89,39 @@ def create_chart(
         if y_label:
             ax.set_ylabel(y_label)
 
-        plt.tight_layout()
+        fig.tight_layout()
 
-        # 保存为文件
-        filename = f"chart_{chart_type}_{hash(title) % 10000}.png"
+        # 用 uuid 生成唯一文件名，杜绝文件覆盖
+        unique_id = uuid.uuid4().hex[:8]
+        filename = f"chart_{chart_type}_{unique_id}.png"
         filepath = os.path.join(CHART_DIR, filename)
-        fig.savefig(filepath, dpi=150, bbox_inches="tight")
 
-        # 转 base64
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        buf.seek(0)
-        b64 = base64.b64encode(buf.read()).decode()
+        # 加锁渲染：matplotlib Agg 后端在 savefig 时非完全线程安全
+        with _render_lock:
+            fig.savefig(filepath, dpi=150, bbox_inches="tight")
 
-        plt.close(fig)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+            buf.seek(0)
+            b64 = base64.b64encode(buf.read()).decode()
+
+        # 显式清理，释放内存
+        fig.clear()
+        del fig
 
         return {"path": filepath, "filename": filename, "base64": b64}
 
     except Exception as e:
-        plt.close(fig)
+        fig.clear()
+        del fig
         return {"error": f"生成图表失败: {str(e)}"}
 
 
 def _draw_bar(ax, data: dict):
     """绘制柱状图"""
+    import numpy as np
     labels = data.get("labels", [])
     if "series" in data:
-        import numpy as np
         n_series = len(data["series"])
         x = np.arange(len(labels))
         width = 0.8 / n_series
@@ -117,7 +133,7 @@ def _draw_bar(ax, data: dict):
         ax.legend()
     else:
         values = data.get("values", [])
-        colors = plt.cm.Set2.colors[:len(labels)]
+        colors = colormaps["Set2"].colors[:len(labels)]
         ax.bar(labels, values, color=colors)
 
 
@@ -138,7 +154,7 @@ def _draw_pie(ax, data: dict):
     """绘制饼图"""
     labels = data.get("labels", [])
     values = data.get("values", [])
-    colors = plt.cm.Set3.colors[:len(labels)]
+    colors = colormaps["Set3"].colors[:len(labels)]
     ax.pie(values, labels=labels, autopct="%1.1f%%", colors=colors, startangle=90)
     ax.axis("equal")
 

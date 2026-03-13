@@ -4,36 +4,44 @@
 在多轮对话中，用户的后续问题往往包含指代词（如"它"、"这个"、"上面提到的"），
 直接用这些模糊语句检索会导致召回质量差。
 
-本模块通过 LLM 根据对话历史将当前问题重写为一个独立、完整的检索查询词，
-从而提升向量检索的准确性。
+本模块通过本地 Ollama 小模型根据对话历史将当前问题重写为一个独立、完整的检索查询词，
+从而提升向量检索的准确性，同时避免消耗远程 API 配额。
 """
 
+from openai import OpenAI
 
-def rewrite_query(client, messages, current_query, model="deepseek-chat"):
+# Ollama 本地客户端（兼容 OpenAI API 格式）
+_ollama_client = OpenAI(
+    base_url="http://localhost:11434/v1",
+    api_key="ollama",  # Ollama 不验证 key，任意值即可
+)
+
+REWRITE_MODEL = "qwen2.5"
+
+
+def rewrite_query(client, messages, current_query):
     """
     根据对话历史重写用户查询，使其成为一个独立且适合检索的查询语句。
+    使用本地 Ollama 模型完成，不消耗远程 API。
 
     Args:
-        client: OpenAI 客户端实例
+        client: （保留参数，不再使用，保持调用签名兼容）
         messages: 当前对话历史 (list[dict])
         current_query: 用户当前输入的原始问题 (str)
-        model: 使用的模型名称
 
     Returns:
         str: 重写后的查询词
     """
-    # 提取最近的对话上下文（最多取最近 6 轮 user/assistant 消息）
+
     recent_context = []
     for msg in messages:
         if msg["role"] in ("user", "assistant"):
             recent_context.append(msg)
     recent_context = recent_context[-6:]
 
-    # 如果没有历史对话，无需重写
     if not recent_context:
         return current_query
 
-    # 构造对话摘要
     history_text = "\n".join(
         f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
         for m in recent_context
@@ -57,15 +65,14 @@ def rewrite_query(client, messages, current_query, model="deepseek-chat"):
         }
     ]
 
-    response = client.chat.completions.create(
-        model=model,
+    response = _ollama_client.chat.completions.create(
+        model=REWRITE_MODEL,
         messages=rewrite_messages,
         temperature=0,
         max_tokens=150,
     )
 
     rewritten = response.choices[0].message.content.strip()
-    # 去除可能的引号包裹
     if (rewritten.startswith('"') and rewritten.endswith('"')) or \
        (rewritten.startswith("'") and rewritten.endswith("'")):
         rewritten = rewritten[1:-1]
